@@ -13,6 +13,28 @@
   <link rel="stylesheet" href="style.css">
 </head>
 
+  
+
+<body>
+  <main class="page-center">
+    <section class="card login-card">
+      <div class="brand">
+        <h1>Patient Monitor</h1>
+        <p class="muted">Sign in to continue</p>
+      </div>
+
+      <form class="form" onsubmit="return false;">
+        <label class="label">Username</label>
+        <input class="input" type="text" placeholder="Enter username" />
+
+        <label class="label">Password</label>
+        <input class="input" type="password" placeholder="Enter password" />
+
+        <button class="btn primary" type="submit">Login</button>
+      </form>
+    </section>
+  </main>
+
   <script>
 async function loginUser() {
   const username = document.getElementById("username").value.trim();
@@ -44,24 +66,5 @@ document.querySelector("form").addEventListener("submit", function (e) {
 });
 </script>
 
-<body>
-  <main class="page-center">
-    <section class="card login-card">
-      <div class="brand">
-        <h1>Patient Monitor</h1>
-        <p class="muted">Sign in to continue</p>
-      </div>
-
-      <form class="form" onsubmit="return false;">
-        <label class="label">Username</label>
-        <input class="input" type="text" placeholder="Enter username" />
-
-        <label class="label">Password</label>
-        <input class="input" type="password" placeholder="Enter password" />
-
-        <button class="btn primary" type="submit">Login</button>
-      </form>
-    </section>
-  </main>
 </body>
 </html>
