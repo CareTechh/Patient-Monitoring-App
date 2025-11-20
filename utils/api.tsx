@@ -1,7 +1,8 @@
 import { projectId, publicAnonKey } from './supabase/info';
 import { createClient } from './supabase/client';
 
-const API_BASE = `https://${projectId}.supabase.co/functions/v1/make-server-3d5bb2df`;
+const API_BASE = "http://localhost:8000";
+
 
 // Get auth token
 async function getAuthToken(): Promise<string> {
