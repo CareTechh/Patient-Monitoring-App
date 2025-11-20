@@ -1,553 +1,307 @@
-import { Hono } from "npm:hono";
-import { cors } from "npm:hono/cors";
-import { logger } from "npm:hono/logger";
-import { createClient } from "npm:@supabase/supabase-js";
-import * as kv from "./kv_store.tsx";
+import { useState } from 'react';
+import { Button } from './ui/button';
+import { Input } from './ui/input';
+import { Label } from './ui/label';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
+import { Heart, Activity, Stethoscope, Loader2 } from 'lucide-react';
+import { createClient } from '../utils/supabase/client';
+import { projectId, publicAnonKey } from '../utils/supabase/info';
+import { toast } from 'sonner@2.0.3';
 
-const app = new Hono();
-
-// Enable logger
-app.use('*', logger(console.log));
-
-// Enable CORS for all routes and methods
-app.use(
-  "/*",
-  cors({
-    origin: "*",
-    allowHeaders: ["Content-Type", "Authorization"],
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    exposeHeaders: ["Content-Length"],
-    maxAge: 600,
-  }),
-);
-
-// Helper function to verify user authentication
-async function verifyUser(authHeader: string | null) {
-  if (!authHeader) {
-    return { error: 'No authorization header', status: 401 };
-  }
-  
-  const accessToken = authHeader.split(' ')[1];
-  const supabase = createClient(
-    Deno.env.get('SUPABASE_URL') || '',
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '',
-  );
-  
-  const { data: { user }, error } = await supabase.auth.getUser(accessToken);
-  
-  if (error || !user) {
-    return { error: 'Unauthorized', status: 401 };
-  }
-  
-  return { user };
+interface LoginPageProps {
+  onLogin: (user: { id: string; email: string; name: string; role: 'doctor' | 'patient' | 'family' }) => void;
 }
 
-// Health check endpoint
-app.get("/make-server-3d5bb2df/health", (c) => {
-  return c.json({ status: "ok" });
-});
+export default function LoginPage({ onLogin }: LoginPageProps) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [selectedRole, setSelectedRole] = useState<'doctor' | 'patient' | 'family'>('patient');
+  const [isSignup, setIsSignup] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
-// Signup endpoint - creates a new user with role metadata and patient profile
-app.post("/make-server-3d5bb2df/signup", async (c) => {
-  try {
-    const supabase = createClient(
-      Deno.env.get('SUPABASE_URL') || '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '',
-    );
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
 
-    const body = await c.req.json();
-    const { email, password, name, role } = body;
+    try {
+      const supabase = createClient();
 
-    if (!email || !password || !name || !role) {
-      console.log('Signup error: Missing required fields', { email, name, role });
-      return c.json({ error: 'Email, password, name, and role are required' }, 400);
-    }
+      if (isSignup) {
+        // Validation
+        if (!name.trim()) {
+          toast.error('Please enter your full name');
+          setIsLoading(false);
+          return;
+        }
+        
+        if (password.length < 6) {
+          toast.error('Password must be at least 6 characters');
+          setIsLoading(false);
+          return;
+        }
 
-    // Create user with admin API to auto-confirm email
-    const { data, error } = await supabase.auth.admin.createUser({
-      email,
-      password,
-      user_metadata: { 
-        name,
-        role // 'doctor' | 'patient' | 'family'
-      },
-      // Automatically confirm the user's email since an email server hasn't been configured.
-      email_confirm: true
-    });
+        // Call server to create user with role metadata
+        console.log('Attempting signup:', { email, name, role: selectedRole });
+        
+        const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-3d5bb2df/signup`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${publicAnonKey}`
+          },
+          body: JSON.stringify({ email, password, name, role: selectedRole })
+        });
 
-    if (error) {
-      console.log('Signup error from Supabase:', error.message);
-      return c.json({ error: error.message }, 400);
-    }
+        const data = await response.json();
+        console.log('Signup response:', data);
 
-    const userId = data.user?.id;
-    
-    // Store patient/user profile in KV store
-    const profile = {
-      id: userId,
-      email: data.user?.email,
-      name,
-      role,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      // Patient-specific fields
-      ...(role === 'patient' && {
-        age: null,
-        gender: null,
-        bloodType: null,
-        allergies: [],
-        medications: [],
-        emergencyContact: null,
-        assignedDoctorId: null
-      })
-    };
+        if (!response.ok) {
+          console.error('Signup error:', data.error);
+          toast.error(data.error || 'Failed to create account');
+          setIsLoading(false);
+          return;
+        }
 
-    await kv.set(`profile:${userId}`, profile);
-    console.log('User profile created successfully:', userId);
-
-    return c.json({ 
-      user: {
-        id: userId,
-        email: data.user?.email,
-        name,
-        role
+        toast.success('Account created successfully! You can now log in.');
+        setIsSignup(false);
+        setPassword('');
+        setIsLoading(false);
+        return;
       }
-    });
 
-  } catch (error) {
-    console.log('Signup error during user creation:', error);
-    return c.json({ error: 'Failed to create user account' }, 500);
-  }
-});
-
-// Get user profile
-app.get("/make-server-3d5bb2df/profile/:userId", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const userId = c.req.param('userId');
-    const profile = await kv.get(`profile:${userId}`);
-
-    if (!profile) {
-      return c.json({ error: 'Profile not found' }, 404);
-    }
-
-    return c.json({ profile });
-  } catch (error) {
-    console.log('Error fetching profile:', error);
-    return c.json({ error: 'Failed to fetch profile' }, 500);
-  }
-});
-
-// Update user profile
-app.put("/make-server-3d5bb2df/profile/:userId", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const userId = c.req.param('userId');
-    const updates = await c.req.json();
-
-    const existingProfile = await kv.get(`profile:${userId}`);
-    if (!existingProfile) {
-      return c.json({ error: 'Profile not found' }, 404);
-    }
-
-    const updatedProfile = {
-      ...existingProfile,
-      ...updates,
-      id: userId, // Prevent ID override
-      updatedAt: new Date().toISOString()
-    };
-
-    await kv.set(`profile:${userId}`, updatedProfile);
-    console.log('Profile updated successfully:', userId);
-
-    return c.json({ profile: updatedProfile });
-  } catch (error) {
-    console.log('Error updating profile:', error);
-    return c.json({ error: 'Failed to update profile' }, 500);
-  }
-});
-
-// Add vital reading
-app.post("/make-server-3d5bb2df/vitals", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const body = await c.req.json();
-    const { patientId, heartRate, bloodPressure, oxygenLevel, temperature, notes } = body;
-
-    if (!patientId) {
-      return c.json({ error: 'Patient ID is required' }, 400);
-    }
-
-    const timestamp = new Date().toISOString();
-    const vitalId = `vitals:${patientId}:${Date.now()}`;
-
-    const vitalReading = {
-      id: vitalId,
-      patientId,
-      heartRate: heartRate || null,
-      bloodPressure: bloodPressure || null,
-      oxygenLevel: oxygenLevel || null,
-      temperature: temperature || null,
-      notes: notes || '',
-      timestamp,
-      recordedBy: authResult.user.id
-    };
-
-    await kv.set(vitalId, vitalReading);
-    console.log('Vital reading recorded:', vitalId);
-
-    // Check for abnormal readings and create alerts
-    const alerts = [];
-    
-    if (heartRate && (heartRate < 60 || heartRate > 100)) {
-      alerts.push({
-        type: 'Heart Rate',
-        severity: heartRate < 40 || heartRate > 120 ? 'critical' : 'warning',
-        value: heartRate,
-        message: `Heart rate ${heartRate < 60 ? 'below' : 'above'} normal range`
+      // Login with Supabase
+      console.log('Attempting login:', email);
+      
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
       });
+
+      if (error) {
+        console.error('Login error:', error.message);
+        
+        // Better error messages
+        if (error.message.includes('Invalid login credentials')) {
+          toast.error('Invalid email or password. Please check your credentials.');
+        } else if (error.message.includes('Email not confirmed')) {
+          toast.error('Please verify your email before logging in.');
+        } else {
+          toast.error(error.message || 'Failed to login');
+        }
+        
+        setIsLoading(false);
+        return;
+      }
+
+      if (data.user) {
+        const userName = data.user.user_metadata?.name || 'User';
+        const userRole = data.user.user_metadata?.role || 'patient';
+
+        console.log('Login successful:', { id: data.user.id, email: data.user.email, name: userName, role: userRole });
+
+        toast.success(`Welcome back, ${userName}!`);
+        
+        onLogin({
+          id: data.user.id,
+          email: data.user.email || email,
+          name: userName,
+          role: userRole
+        });
+      }
+    } catch (error: any) {
+      console.error('Authentication error:', error);
+      toast.error(error.message || 'An unexpected error occurred');
+    } finally {
+      setIsLoading(false);
     }
-    
-    if (oxygenLevel && oxygenLevel < 95) {
-      alerts.push({
-        type: 'Oxygen Level',
-        severity: oxygenLevel < 90 ? 'critical' : 'warning',
-        value: oxygenLevel,
-        message: `Oxygen saturation below normal (${oxygenLevel}%)`
-      });
-    }
-    
-    if (temperature && (temperature < 36.1 || temperature > 37.2)) {
-      alerts.push({
-        type: 'Temperature',
-        severity: temperature < 35 || temperature > 38.5 ? 'critical' : 'warning',
-        value: temperature,
-        message: `Body temperature ${temperature < 36.1 ? 'below' : 'above'} normal range`
-      });
-    }
+  };
 
-    // Store alerts
-    for (const alert of alerts) {
-      const alertId = `alert:${patientId}:${Date.now()}-${alert.type}`;
-      await kv.set(alertId, {
-        id: alertId,
-        patientId,
-        vitalId,
-        ...alert,
-        timestamp,
-        acknowledged: false
-      });
-    }
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-sky-100 via-blue-50 to-teal-100 relative overflow-hidden">
+      {/* Animated Background Blobs */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-20 left-10 w-72 h-72 bg-blue-400/20 rounded-full blur-3xl animate-pulse-soft"></div>
+        <div className="absolute bottom-20 right-10 w-96 h-96 bg-emerald-400/20 rounded-full blur-3xl animate-pulse-soft" style={{ animationDelay: '1s' }}></div>
+        <div className="absolute top-1/2 left-1/2 w-80 h-80 bg-cyan-400/20 rounded-full blur-3xl animate-pulse-soft" style={{ animationDelay: '2s' }}></div>
+      </div>
+      
+      {/* Version Badge */}
+      <div className="fixed top-6 right-6 z-50 bg-gradient-to-r from-blue-600 to-teal-600 text-white px-5 py-2.5 rounded-full shadow-2xl border border-white/20 backdrop-blur-sm">
+        <p className="text-sm font-semibold">v3.0 - Enhanced Healthcare UI ✨</p>
+      </div>
+      
+      <div className="w-full max-w-6xl flex gap-8 items-center">
+        {/* Left side - Branding */}
+        <div className="hidden lg:flex flex-1 flex-col gap-6 relative z-10">
+          <div className="flex items-center gap-4">
+            <div className="w-16 h-16 rounded-3xl bg-gradient-to-br from-blue-600 to-teal-600 flex items-center justify-center shadow-2xl shadow-blue-500/30 animate-fadeIn">
+              <Activity className="w-9 h-9 text-white" strokeWidth={2.5} />
+            </div>
+            <div>
+              <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-teal-600">HealthMonitor</h1>
+              <p className="text-slate-700 font-medium">Smart Digital Health Monitoring</p>
+            </div>
+          </div>
+          
+          <div className="space-y-4 mt-8 animate-slideInRight">
+            <div className="flex items-start gap-4 p-5 rounded-2xl bg-white/80 backdrop-blur-md border-2 border-blue-200/50 shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-105 cursor-pointer">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center flex-shrink-0 shadow-lg shadow-blue-500/30">
+                <Heart className="w-6 h-6 text-white" strokeWidth={2.5} />
+              </div>
+              <div>
+                <h3 className="text-slate-900 font-semibold text-lg">Real-time Monitoring</h3>
+                <p className="text-slate-600 text-sm leading-relaxed">Track vital signs continuously with instant alerts</p>
+              </div>
+            </div>
+            
+            <div className="flex items-start gap-4 p-5 rounded-2xl bg-white/80 backdrop-blur-md border-2 border-emerald-200/50 shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-105 cursor-pointer" style={{ animationDelay: '0.1s' }}>
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center flex-shrink-0 shadow-lg shadow-emerald-500/30">
+                <Stethoscope className="w-6 h-6 text-white" strokeWidth={2.5} />
+              </div>
+              <div>
+                <h3 className="text-slate-900 font-semibold text-lg">Professional Care</h3>
+                <p className="text-slate-600 text-sm leading-relaxed">Connect with doctors and caregivers seamlessly</p>
+              </div>
+            </div>
+            
+            <div className="flex items-start gap-4 p-5 rounded-2xl bg-white/80 backdrop-blur-md border-2 border-cyan-200/50 shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-105 cursor-pointer" style={{ animationDelay: '0.2s' }}>
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 flex items-center justify-center flex-shrink-0 shadow-lg shadow-cyan-500/30">
+                <Activity className="w-6 h-6 text-white" strokeWidth={2.5} />
+              </div>
+              <div>
+                <h3 className="text-slate-900 font-semibold text-lg">Health Analytics</h3>
+                <p className="text-slate-600 text-sm leading-relaxed">View trends and insights from your health data</p>
+              </div>
+            </div>
+          </div>
+        </div>
 
-    return c.json({ 
-      vitalReading,
-      alerts: alerts.length > 0 ? alerts : null
-    });
-  } catch (error) {
-    console.log('Error recording vital reading:', error);
-    return c.json({ error: 'Failed to record vital reading' }, 500);
-  }
-});
+        {/* Right side - Login Form */}
+        <div className="flex-1 max-w-md w-full relative z-10">
+          <Card className="w-full max-w-md border-2 border-slate-200 shadow-2xl bg-white/95 backdrop-blur-sm">
+            <CardHeader className="space-y-3">
+              <CardTitle className="text-3xl text-center bg-gradient-to-r from-blue-600 to-emerald-600 bg-clip-text text-transparent">
+                Patient Monitoring System
+              </CardTitle>
+              <CardDescription className="text-center text-base">
+                {isSignup ? 'Create your account to get started' : 'Sign in to access your dashboard'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Tabs defaultValue="patient" onValueChange={(v) => setSelectedRole(v as any)} className="mb-6">
+                <TabsList className="grid w-full grid-cols-3 bg-slate-100/80 p-1.5 h-auto">
+                  <TabsTrigger value="patient" className="data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-600 data-[state=active]:to-teal-600 data-[state=active]:text-white data-[state=active]:shadow-lg py-2.5 rounded-lg font-medium transition-all">
+                    Patient
+                  </TabsTrigger>
+                  <TabsTrigger value="doctor" className="data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-600 data-[state=active]:to-teal-600 data-[state=active]:text-white data-[state=active]:shadow-lg py-2.5 rounded-lg font-medium transition-all">
+                    Doctor
+                  </TabsTrigger>
+                  <TabsTrigger value="family" className="data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-600 data-[state=active]:to-teal-600 data-[state=active]:text-white data-[state=active]:shadow-lg py-2.5 rounded-lg font-medium transition-all">
+                    Family
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
 
-// Get vital readings for a patient
-app.get("/make-server-3d5bb2df/vitals/:patientId", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
+              <form onSubmit={handleSubmit} className="space-y-5">
+                {isSignup && (
+                  <div className="space-y-2.5">
+                    <Label htmlFor="name" className="text-sm font-semibold text-slate-700">Full Name</Label>
+                    <Input
+                      id="name"
+                      type="text"
+                      placeholder="John Doe"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      required
+                      className="h-12 border-2 border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 rounded-xl bg-slate-50/50 transition-all"
+                    />
+                  </div>
+                )}
+                
+                <div className="space-y-2.5">
+                  <Label htmlFor="email" className="text-sm font-semibold text-slate-700">Email Address</Label>
+                  <Input
+                    id="email"
+                    type="email"
+                    placeholder="name@example.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    className="h-12 border-2 border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 rounded-xl bg-slate-50/50 transition-all"
+                  />
+                </div>
+                
+                <div className="space-y-2.5">
+                  <Label htmlFor="password" className="text-sm font-semibold text-slate-700">Password</Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    placeholder="••••••••"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    className="h-12 border-2 border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 rounded-xl bg-slate-50/50 transition-all"
+                  />
+                </div>
 
-    const patientId = c.req.param('patientId');
-    const limit = parseInt(c.req.query('limit') || '50');
+                <Button 
+                  type="submit" 
+                  disabled={isLoading}
+                  className="w-full h-12 bg-gradient-to-r from-blue-600 to-teal-600 hover:from-blue-700 hover:to-teal-700 shadow-lg hover:shadow-xl transition-all duration-300 text-base font-semibold rounded-xl disabled:opacity-50"
+                >
+                  {isLoading ? (
+                    <>
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                      {isSignup ? 'Creating Account...' : 'Logging in...'}
+                    </>
+                  ) : (
+                    isSignup ? 'Sign Up' : 'Login'
+                  )}
+                </Button>
 
-    const allVitals = await kv.getByPrefix(`vitals:${patientId}:`);
-    
-    // Sort by timestamp (newest first) and limit
-    const vitals = allVitals
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-      .slice(0, limit);
+                {!isSignup && (
+                  <div className="text-center">
+                    <button
+                      type="button"
+                      className="text-sm font-medium text-blue-600 hover:text-blue-700 hover:underline transition-colors"
+                      onClick={() => alert('Password reset link would be sent to your email')}
+                    >
+                      Forgot Password?
+                    </button>
+                  </div>
+                )}
 
-    return c.json({ vitals });
-  } catch (error) {
-    console.log('Error fetching vitals:', error);
-    return c.json({ error: 'Failed to fetch vital readings' }, 500);
-  }
-});
-
-// Get alerts for a patient
-app.get("/make-server-3d5bb2df/alerts/:patientId", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const patientId = c.req.param('patientId');
-    const allAlerts = await kv.getByPrefix(`alert:${patientId}:`);
-    
-    // Sort by timestamp (newest first)
-    const alerts = allAlerts
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-    return c.json({ alerts });
-  } catch (error) {
-    console.log('Error fetching alerts:', error);
-    return c.json({ error: 'Failed to fetch alerts' }, 500);
-  }
-});
-
-// Acknowledge an alert
-app.put("/make-server-3d5bb2df/alerts/:alertId/acknowledge", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const alertId = c.req.param('alertId');
-    const alert = await kv.get(alertId);
-
-    if (!alert) {
-      return c.json({ error: 'Alert not found' }, 404);
-    }
-
-    const updatedAlert = {
-      ...alert,
-      acknowledged: true,
-      acknowledgedBy: authResult.user.id,
-      acknowledgedAt: new Date().toISOString()
-    };
-
-    await kv.set(alertId, updatedAlert);
-    console.log('Alert acknowledged:', alertId);
-
-    return c.json({ alert: updatedAlert });
-  } catch (error) {
-    console.log('Error acknowledging alert:', error);
-    return c.json({ error: 'Failed to acknowledge alert' }, 500);
-  }
-});
-
-// Get all patients (for doctors)
-app.get("/make-server-3d5bb2df/patients", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const allProfiles = await kv.getByPrefix('profile:');
-    const patients = allProfiles
-      .filter(profile => profile.role === 'patient')
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-    return c.json({ patients });
-  } catch (error) {
-    console.log('Error fetching patients:', error);
-    return c.json({ error: 'Failed to fetch patients' }, 500);
-  }
-});
-
-// Assign doctor to patient
-app.put("/make-server-3d5bb2df/patients/:patientId/assign-doctor", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const patientId = c.req.param('patientId');
-    const { doctorId } = await c.req.json();
-
-    const patientProfile = await kv.get(`profile:${patientId}`);
-    if (!patientProfile) {
-      return c.json({ error: 'Patient not found' }, 404);
-    }
-
-    const updatedProfile = {
-      ...patientProfile,
-      assignedDoctorId: doctorId,
-      updatedAt: new Date().toISOString()
-    };
-
-    await kv.set(`profile:${patientId}`, updatedProfile);
-    console.log('Doctor assigned to patient:', { patientId, doctorId });
-
-    return c.json({ profile: updatedProfile });
-  } catch (error) {
-    console.log('Error assigning doctor to patient:', error);
-    return c.json({ error: 'Failed to assign doctor' }, 500);
-  }
-});
-
-// Get all alerts (for doctors - across all patients)
-app.get("/make-server-3d5bb2df/alerts/all", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const allAlerts = await kv.getByPrefix('alert:');
-    
-    // Fetch patient profiles to enrich alert data
-    const patientProfiles = await kv.getByPrefix('profile:');
-    const patientMap = new Map(
-      patientProfiles
-        .filter(p => p.role === 'patient')
-        .map(p => [p.id, p])
-    );
-
-    // Enrich alerts with patient information
-    const enrichedAlerts = allAlerts.map(alert => ({
-      ...alert,
-      patientName: patientMap.get(alert.patientId)?.name || 'Unknown Patient',
-      patientAge: patientMap.get(alert.patientId)?.age || null,
-      patientEmail: patientMap.get(alert.patientId)?.email || null
-    }));
-
-    // Sort by timestamp (newest first)
-    const alerts = enrichedAlerts
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-    return c.json({ alerts });
-  } catch (error) {
-    console.log('Error fetching all alerts:', error);
-    return c.json({ error: 'Failed to fetch alerts' }, 500);
-  }
-});
-
-// Get analytics data for a patient
-app.get("/make-server-3d5bb2df/analytics/:patientId", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const patientId = c.req.param('patientId');
-    const period = c.req.query('period') || '7days';
-
-    // Get all vitals for patient
-    const allVitals = await kv.getByPrefix(`vitals:${patientId}:`);
-    const allAlerts = await kv.getByPrefix(`alert:${patientId}:`);
-
-    // Filter based on period
-    const now = new Date();
-    let cutoffDate = new Date();
-    switch (period) {
-      case '7days':
-        cutoffDate.setDate(now.getDate() - 7);
-        break;
-      case '30days':
-        cutoffDate.setDate(now.getDate() - 30);
-        break;
-      case '3months':
-        cutoffDate.setMonth(now.getMonth() - 3);
-        break;
-      case '1year':
-        cutoffDate.setFullYear(now.getFullYear() - 1);
-        break;
-    }
-
-    const vitals = allVitals
-      .filter(v => new Date(v.timestamp) >= cutoffDate)
-      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-    const alerts = allAlerts
-      .filter(a => new Date(a.timestamp) >= cutoffDate)
-      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-    // Calculate statistics
-    const stats = {
-      totalReadings: vitals.length,
-      normalReadings: vitals.filter(v => {
-        const hrNormal = !v.heartRate || (v.heartRate >= 60 && v.heartRate <= 100);
-        const o2Normal = !v.oxygenLevel || v.oxygenLevel >= 95;
-        const tempNormal = !v.temperature || (v.temperature >= 36.1 && v.temperature <= 37.2);
-        return hrNormal && o2Normal && tempNormal;
-      }).length,
-      totalAlerts: alerts.length,
-      criticalAlerts: alerts.filter(a => a.severity === 'critical').length,
-      warningAlerts: alerts.filter(a => a.severity === 'warning').length
-    };
-
-    return c.json({ vitals, alerts, stats });
-  } catch (error) {
-    console.log('Error fetching analytics:', error);
-    return c.json({ error: 'Failed to fetch analytics' }, 500);
-  }
-});
-
-// Get aggregate analytics for all patients (for doctors)
-app.get("/make-server-3d5bb2df/analytics/aggregate/all", async (c) => {
-  try {
-    const authResult = await verifyUser(c.req.header('Authorization'));
-    if (authResult.error) {
-      return c.json({ error: authResult.error }, authResult.status);
-    }
-
-    const period = c.req.query('period') || '7days';
-
-    // Get all vitals and alerts
-    const allVitals = await kv.getByPrefix('vitals:');
-    const allAlerts = await kv.getByPrefix('alert:');
-    const allPatients = await kv.getByPrefix('profile:');
-    const patients = allPatients.filter(p => p.role === 'patient');
-
-    // Filter based on period
-    const now = new Date();
-    let cutoffDate = new Date();
-    switch (period) {
-      case '7days':
-        cutoffDate.setDate(now.getDate() - 7);
-        break;
-      case '30days':
-        cutoffDate.setDate(now.getDate() - 30);
-        break;
-      case '3months':
-        cutoffDate.setMonth(now.getMonth() - 3);
-        break;
-      case '1year':
-        cutoffDate.setFullYear(now.getFullYear() - 1);
-        break;
-    }
-
-    const vitals = allVitals.filter(v => new Date(v.timestamp) >= cutoffDate);
-    const alerts = allAlerts.filter(a => new Date(a.timestamp) >= cutoffDate);
-
-    // Calculate aggregate statistics
-    const stats = {
-      totalPatients: patients.length,
-      totalReadings: vitals.length,
-      totalAlerts: alerts.length,
-      criticalAlerts: alerts.filter(a => a.severity === 'critical').length,
-      warningAlerts: alerts.filter(a => a.severity === 'warning').length,
-      avgHeartRate: vitals.filter(v => v.heartRate).length > 0
-        ? Math.round(vitals.filter(v => v.heartRate).reduce((sum, v) => sum + v.heartRate, 0) / vitals.filter(v => v.heartRate).length)
-        : 0,
-      avgOxygenLevel: vitals.filter(v => v.oxygenLevel).length > 0
-        ? Math.round(vitals.filter(v => v.oxygenLevel).reduce((sum, v) => sum + v.oxygenLevel, 0) / vitals.filter(v => v.oxygenLevel).length)
-        : 0
-    };
-
-    return c.json({ vitals, alerts, stats, patients });
-  } catch (error) {
-    console.log('Error fetching aggregate analytics:', error);
-    return c.json({ error: 'Failed to fetch aggregate analytics' }, 500);
-  }
-});
-
-Deno.serve(app.fetch);
+                <div className="text-center pt-6 border-t-2 border-slate-100">
+                  <p className="text-sm text-slate-600">
+                    {isSignup ? 'Already have an account?' : "Don't have an account?"}{' '}
+                    <button
+                      type="button"
+                      className="font-semibold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-600 hover:from-blue-700 hover:to-teal-700 transition-all"
+                      onClick={() => {
+                        setIsSignup(!isSignup);
+                        setPassword('');
+                        setName('');
+                      }}
+                    >
+                      {isSignup ? 'Login' : 'Sign Up'}
+                    </button>
+                  </p>
+                </div>
+                
+                {!isSignup && (
+                  <div className="mt-4 p-4 bg-blue-50/80 border-2 border-blue-200/60 rounded-xl">
+                    <p className="text-xs text-slate-600 font-medium text-center">
+                      💡 <strong>First time?</strong> Create an account by clicking "Sign Up" above
+                    </p>
+                  </div>
+                )}
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
